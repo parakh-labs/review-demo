@@ -49,3 +49,18 @@ def test_cost_is_validated():
     from ratelimit import PerUserLimiter
     with pytest.raises(ValueError):
         PerUserLimiter(rate=1, capacity=1).allow("a", cost=0)
+
+
+def test_saturated_table_reports_a_retry_delay_and_skips_rescans(monkeypatch):
+    import ratelimit
+    from ratelimit import PerUserLimiter
+    now = [0.0]
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
+    limiter = PerUserLimiter(rate=1, capacity=2, max_users=1)
+    assert limiter.allow("a", cost=2)
+    assert not limiter.allow("b")
+    assert limiter.retry_after("b") == 2.0  # a is full again in 2s
+    now[0] += 1
+    assert limiter.retry_after("b") == 1.0
+    now[0] += 1
+    assert limiter.allow("b")  # a refilled, evicted, b admitted

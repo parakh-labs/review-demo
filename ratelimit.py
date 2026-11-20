@@ -36,19 +36,27 @@ class PerUserLimiter:
         self.capacity = capacity
         self.max_users = max_users
         self.buckets: "OrderedDict[str, TokenBucket]" = OrderedDict()
+        self._no_evict_before = 0.0
 
     def _evict_full(self) -> bool:
         """Drop the least recently used bucket that has refilled to capacity.
 
         A full bucket is indistinguishable from a new one, so dropping it
         cannot hand anyone extra tokens. Returns False if every bucket is
-        still draining.
+        still draining. A failed scan records the earliest moment any bucket
+        can be full (a lower bound: use only drains buckets further), so
+        repeated requests while the table is saturated cost O(1), not O(n).
         """
+        if time.monotonic() < self._no_evict_before:
+            return False
+        soonest = float("inf")
         for user_id, bucket in self.buckets.items():
             bucket.refill()
             if bucket.tokens >= bucket.capacity:
                 del self.buckets[user_id]
                 return True
+            soonest = min(soonest, (bucket.capacity - bucket.tokens) / bucket.rate)
+        self._no_evict_before = time.monotonic() + soonest
         return False
 
     def _bucket(self, user_id: str):
@@ -72,6 +80,9 @@ class PerUserLimiter:
         """Seconds until `cost` tokens are available; 0 when they are now."""
         bucket = self.buckets.get(user_id)
         if bucket is None:
+            if len(self.buckets) >= self.max_users:
+                # Table saturated: a new id is rejected until a slot frees up.
+                return max(0.0, self._no_evict_before - time.monotonic())
             return 0.0
         bucket.refill()
         return max(0.0, (cost - bucket.tokens) / bucket.rate)
