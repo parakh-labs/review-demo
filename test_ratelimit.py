@@ -100,3 +100,47 @@ def test_saturated_retry_after_is_cached_between_changes(monkeypatch):
     for _ in range(5):
         assert limiter.retry_after("b") == 2.0
     assert len(scans) == 1
+
+
+def test_cost_above_capacity_is_rejected_not_silently_denied():
+    import pytest
+    from ratelimit import PerUserLimiter
+    limiter = PerUserLimiter(rate=1, capacity=2)
+    for call in (limiter.allow, limiter.retry_after):
+        with pytest.raises(ValueError):
+            call("a", cost=3)
+
+
+def test_rejected_new_ids_do_not_invalidate_the_cached_slot_time(monkeypatch):
+    import ratelimit
+    from ratelimit import PerUserLimiter
+    now = [0.0]
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
+    limiter = PerUserLimiter(rate=1, capacity=2, max_users=1)
+    limiter.allow("a", cost=2)
+    limiter.retry_after("b")
+    version = limiter._version
+    for _ in range(3):
+        assert not limiter.allow("b")
+    assert limiter._version == version
+
+
+def test_never_more_permissive_than_unbounded_per_user_buckets(monkeypatch):
+    import random
+    import ratelimit
+    from ratelimit import PerUserLimiter, TokenBucket
+    now = [0.0]
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
+    rng = random.Random(1234)
+    bounded = PerUserLimiter(rate=1, capacity=3, max_users=4)
+    reference = {}
+    for _ in range(3000):
+        now[0] += rng.random() * 1.5
+        user = f"u{rng.randrange(9)}"
+        cost = rng.randint(1, 3)
+        if bounded.allow(user, cost):
+            ref = reference.setdefault(user, TokenBucket(1, 3))
+            assert ref.allow(cost), "bounded limiter allowed what an unbounded one denies"
+        else:
+            reference.setdefault(user, TokenBucket(1, 3)).refill()
+        assert len(bounded.buckets) <= 4

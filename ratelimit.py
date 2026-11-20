@@ -1,4 +1,5 @@
 """Token-bucket rate limiter used by the API gateway."""
+import threading
 import time
 from collections import OrderedDict
 
@@ -39,6 +40,7 @@ class PerUserLimiter:
         self.max_users = max_users
         self.buckets: "OrderedDict[str, TokenBucket]" = OrderedDict()
         self._no_evict_before = 0.0
+        self._lock = threading.RLock()
         self._version = 0  # bumped whenever a bucket changes
         self._slot_version = -1
         self._slot_at = 0.0
@@ -91,20 +93,28 @@ class PerUserLimiter:
         self.buckets[user_id] = bucket
         return bucket
 
+    def _check_cost(self, cost: int) -> None:
+        if cost < 1 or cost > self.capacity:
+            raise ValueError(f"cost must be between 1 and capacity ({self.capacity})")
+
     def allow(self, user_id: str, cost: int = 1) -> bool:
-        if cost < 1:
-            raise ValueError("cost must be at least 1")
-        bucket = self._bucket(user_id)
-        self._version += 1
-        return bucket is not None and bucket.allow(cost)
+        self._check_cost(cost)
+        with self._lock:
+            bucket = self._bucket(user_id)
+            if bucket is None:
+                return False  # nothing changed, so the cached slot time stays valid
+            self._version += 1
+            return bucket.allow(cost)
 
     def retry_after(self, user_id: str, cost: int = 1) -> float:
         """Seconds until `cost` tokens are available; 0 when they are now."""
-        bucket = self.buckets.get(user_id)
-        if bucket is None:
-            if len(self.buckets) >= self.max_users:
-                # Table saturated: a new id waits until some bucket is full.
-                return self._time_until_slot()
-            return 0.0
-        bucket.refill()
-        return max(0.0, (cost - bucket.tokens) / bucket.rate)
+        self._check_cost(cost)
+        with self._lock:
+            bucket = self.buckets.get(user_id)
+            if bucket is None:
+                if len(self.buckets) >= self.max_users:
+                    # Table saturated: a new id waits until some bucket is full.
+                    return self._time_until_slot()
+                return 0.0
+            bucket.refill()
+            return max(0.0, (cost - bucket.tokens) / bucket.rate)
