@@ -221,3 +221,13 @@ def test_deadline_is_measured_from_the_scan_instant_not_a_later_clock_read(monke
     monkeypatch.setattr(ratelimit.time, "monotonic", lambda: 5.0 + 0.1 * next(ticks))
     # at t=5.0 the bucket holds 0.5 tokens: 15s to full, so deadline is exactly 20.0
     assert limiter._slot_deadline(5.0) == 20.0
+
+
+def test_non_integer_costs_are_rejected_without_touching_state():
+    import pytest
+    from ratelimit import PerUserLimiter
+    limiter = PerUserLimiter(rate=1, capacity=2)
+    for cost in (float("nan"), float("inf"), 1.5, True, "1", None):
+        with pytest.raises(ValueError):
+            limiter.allow("a", cost=cost)
+    assert limiter.buckets == {}

@@ -108,7 +108,7 @@ class PerUserLimiter:
         return bucket
 
     def _check_cost(self, cost: int) -> None:
-        if cost < 1 or cost > self.capacity:
+        if isinstance(cost, bool) or not isinstance(cost, int) or not 1 <= cost <= self.capacity:
             raise ValueError(f"cost must be between 1 and capacity ({self.capacity})")
 
     def allow(self, user_id: str, cost: int = 1) -> bool:
