@@ -37,8 +37,9 @@ class PerUserLimiter:
     def __init__(self, rate: float, capacity: int, max_users: int = 10_000):
         if not (math.isfinite(rate) and rate > 0):
             raise ValueError("rate must be a finite number > 0")
-        if capacity < 1 or max_users < 1:
-            raise ValueError("capacity and max_users must be >= 1")
+        for name, value in (("capacity", capacity), ("max_users", max_users)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be an integer >= 1")
         self.rate = rate
         self.capacity = capacity
         self.max_users = max_users

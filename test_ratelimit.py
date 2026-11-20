@@ -82,7 +82,7 @@ def test_retry_after_is_current_after_existing_users_spend_more(monkeypatch):
 def test_invalid_config_is_rejected():
     import pytest
     from ratelimit import PerUserLimiter
-    for kwargs in ({"rate": float("nan"), "capacity": 1}, {"rate": float("inf"), "capacity": 1}, {"rate": -1, "capacity": 1}, {"rate": 0, "capacity": 1}, {"rate": 1, "capacity": 0}, {"rate": 1, "capacity": 1, "max_users": 0}):
+    for kwargs in ({"rate": float("nan"), "capacity": 1}, {"rate": float("inf"), "capacity": 1}, {"rate": -1, "capacity": 1}, {"rate": 0, "capacity": 1}, {"rate": 1, "capacity": float("inf")}, {"rate": 1, "capacity": float("nan")}, {"rate": 1, "capacity": 1, "max_users": float("inf")}, {"rate": 1, "capacity": 1.5}, {"rate": 1, "capacity": True}, {"rate": 1, "capacity": 0}, {"rate": 1, "capacity": 1, "max_users": 0}):
         with pytest.raises(ValueError):
             PerUserLimiter(**kwargs)
 
@@ -146,32 +146,45 @@ def test_never_more_permissive_than_unbounded_per_user_buckets(monkeypatch):
         assert len(bounded.buckets) <= 4
 
 
-def test_public_calls_hold_the_lock():
+def test_every_access_to_shared_state_happens_under_the_lock():
+    from collections import OrderedDict
     from ratelimit import PerUserLimiter
 
     class CountingLock:
-        def __init__(self):
-            self.depth = 0
-            self.entered = 0
+        depth = 0
 
         def __enter__(self):
             self.depth += 1
-            self.entered += 1
 
         def __exit__(self, *exc):
             self.depth -= 1
 
-    limiter = PerUserLimiter(rate=1, capacity=2)
     lock = CountingLock()
+
+    class GuardedDict(OrderedDict):
+        pass
+
+    def guard(name):
+        base = getattr(OrderedDict, name)
+
+        def method(self, *args, **kwargs):
+            assert lock.depth > 0, f"buckets.{name} used without the lock"
+            return base(self, *args, **kwargs)
+
+        return method
+
+    for name in ("get", "items", "values", "move_to_end", "__len__",
+                 "__setitem__", "__delitem__", "__getitem__"):
+        setattr(GuardedDict, name, guard(name))
+
+    limiter = PerUserLimiter(rate=1, capacity=2, max_users=1)
     limiter._lock = lock
-    seen = []
-    original = limiter._bucket
-    limiter._bucket = lambda user: (seen.append(lock.depth), original(user))[1]
+    limiter.buckets = GuardedDict()
     limiter.allow("a")
-    assert seen == [1], "allow touched state without holding the lock"
+    limiter.allow("b")  # saturated: exercises the eviction scan
     limiter.retry_after("a")
-    limiter.retry_after("zz")
-    assert lock.entered == 3 and lock.depth == 0
+    limiter.retry_after("b")  # saturated, unknown id
+    assert lock.depth == 0
 
 
 def test_concurrent_callers_cannot_overspend_one_bucket():
