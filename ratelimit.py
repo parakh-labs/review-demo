@@ -39,6 +39,9 @@ class PerUserLimiter:
         self.max_users = max_users
         self.buckets: "OrderedDict[str, TokenBucket]" = OrderedDict()
         self._no_evict_before = 0.0
+        self._version = 0  # bumped whenever a bucket changes
+        self._slot_version = -1
+        self._slot_at = 0.0
 
     def _evict_full(self) -> bool:
         """Drop the least recently used bucket that has refilled to capacity.
@@ -62,12 +65,20 @@ class PerUserLimiter:
         return False
 
     def _time_until_slot(self) -> float:
-        """Seconds until some bucket is full (0 if one already is)."""
-        soonest = float("inf")
-        for bucket in self.buckets.values():
-            bucket.refill()
-            soonest = min(soonest, max(0.0, (bucket.capacity - bucket.tokens) / bucket.rate))
-        return soonest
+        """Seconds until some bucket is full (0 if one already is).
+
+        Exact, and cached until a bucket is next touched: refill is
+        deterministic, so a flood of rejected new ids costs O(1) each.
+        """
+        now = time.monotonic()
+        if self._slot_version != self._version:
+            soonest = float("inf")
+            for bucket in self.buckets.values():
+                bucket.refill()
+                soonest = min(soonest, max(0.0, (bucket.capacity - bucket.tokens) / bucket.rate))
+            self._slot_at = now + soonest
+            self._slot_version = self._version
+        return max(0.0, self._slot_at - now)
 
     def _bucket(self, user_id: str):
         bucket = self.buckets.get(user_id)
@@ -84,6 +95,7 @@ class PerUserLimiter:
         if cost < 1:
             raise ValueError("cost must be at least 1")
         bucket = self._bucket(user_id)
+        self._version += 1
         return bucket is not None and bucket.allow(cost)
 
     def retry_after(self, user_id: str, cost: int = 1) -> float:

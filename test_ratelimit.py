@@ -85,3 +85,18 @@ def test_invalid_config_is_rejected():
     for kwargs in ({"rate": 0, "capacity": 1}, {"rate": 1, "capacity": 0}, {"rate": 1, "capacity": 1, "max_users": 0}):
         with pytest.raises(ValueError):
             PerUserLimiter(**kwargs)
+
+
+def test_saturated_retry_after_is_cached_between_changes(monkeypatch):
+    import ratelimit
+    from ratelimit import PerUserLimiter
+    now = [0.0]
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
+    limiter = PerUserLimiter(rate=1, capacity=2, max_users=1)
+    limiter.allow("a", cost=2)
+    scans = []
+    original = ratelimit.TokenBucket.refill
+    monkeypatch.setattr(ratelimit.TokenBucket, "refill", lambda self: (scans.append(1), original(self))[1])
+    for _ in range(5):
+        assert limiter.retry_after("b") == 2.0
+    assert len(scans) == 1
