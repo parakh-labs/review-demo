@@ -32,6 +32,8 @@ class PerUserLimiter:
     """
 
     def __init__(self, rate: float, capacity: int, max_users: int = 10_000):
+        if rate <= 0 or capacity < 1 or max_users < 1:
+            raise ValueError("rate must be > 0, capacity and max_users >= 1")
         self.rate = rate
         self.capacity = capacity
         self.max_users = max_users
@@ -59,6 +61,14 @@ class PerUserLimiter:
         self._no_evict_before = time.monotonic() + soonest
         return False
 
+    def _time_until_slot(self) -> float:
+        """Seconds until some bucket is full (0 if one already is)."""
+        soonest = float("inf")
+        for bucket in self.buckets.values():
+            bucket.refill()
+            soonest = min(soonest, max(0.0, (bucket.capacity - bucket.tokens) / bucket.rate))
+        return soonest
+
     def _bucket(self, user_id: str):
         bucket = self.buckets.get(user_id)
         if bucket is not None:
@@ -81,8 +91,8 @@ class PerUserLimiter:
         bucket = self.buckets.get(user_id)
         if bucket is None:
             if len(self.buckets) >= self.max_users:
-                # Table saturated: a new id is rejected until a slot frees up.
-                return max(0.0, self._no_evict_before - time.monotonic())
+                # Table saturated: a new id waits until some bucket is full.
+                return self._time_until_slot()
             return 0.0
         bucket.refill()
         return max(0.0, (cost - bucket.tokens) / bucket.rate)

@@ -58,9 +58,30 @@ def test_saturated_table_reports_a_retry_delay_and_skips_rescans(monkeypatch):
     monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
     limiter = PerUserLimiter(rate=1, capacity=2, max_users=1)
     assert limiter.allow("a", cost=2)
+    assert limiter.retry_after("b") == 2.0  # asked before any rejected allow()
     assert not limiter.allow("b")
     assert limiter.retry_after("b") == 2.0  # a is full again in 2s
     now[0] += 1
     assert limiter.retry_after("b") == 1.0
     now[0] += 1
     assert limiter.allow("b")  # a refilled, evicted, b admitted
+
+
+def test_retry_after_is_current_after_existing_users_spend_more(monkeypatch):
+    import ratelimit
+    from ratelimit import PerUserLimiter
+    now = [0.0]
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
+    limiter = PerUserLimiter(rate=1, capacity=2, max_users=1)
+    limiter.allow("a")
+    assert not limiter.allow("b")  # caches a lower bound
+    limiter.allow("a")  # a drains further
+    assert limiter.retry_after("b") == 2.0
+
+
+def test_invalid_config_is_rejected():
+    import pytest
+    from ratelimit import PerUserLimiter
+    for kwargs in ({"rate": 0, "capacity": 1}, {"rate": 1, "capacity": 0}, {"rate": 1, "capacity": 1, "max_users": 0}):
+        with pytest.raises(ValueError):
+            PerUserLimiter(**kwargs)
