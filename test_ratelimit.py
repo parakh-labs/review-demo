@@ -96,7 +96,7 @@ def test_saturated_retry_after_is_cached_between_changes(monkeypatch):
     limiter.allow("a", cost=2)
     scans = []
     original = ratelimit.TokenBucket.refill
-    monkeypatch.setattr(ratelimit.TokenBucket, "refill", lambda self: (scans.append(1), original(self))[1])
+    monkeypatch.setattr(ratelimit.TokenBucket, "refill", lambda self, now=None: (scans.append(1), original(self, now))[1])
     for _ in range(5):
         assert limiter.retry_after("b") == 2.0
     assert len(scans) == 1
@@ -144,3 +144,54 @@ def test_never_more_permissive_than_unbounded_per_user_buckets(monkeypatch):
         else:
             reference.setdefault(user, TokenBucket(1, 3)).refill()
         assert len(bounded.buckets) <= 4
+
+
+def test_public_calls_hold_the_lock():
+    from ratelimit import PerUserLimiter
+
+    class CountingLock:
+        def __init__(self):
+            self.depth = 0
+            self.entered = 0
+
+        def __enter__(self):
+            self.depth += 1
+            self.entered += 1
+
+        def __exit__(self, *exc):
+            self.depth -= 1
+
+    limiter = PerUserLimiter(rate=1, capacity=2)
+    lock = CountingLock()
+    limiter._lock = lock
+    seen = []
+    original = limiter._bucket
+    limiter._bucket = lambda user: (seen.append(lock.depth), original(user))[1]
+    limiter.allow("a")
+    assert seen == [1], "allow touched state without holding the lock"
+    limiter.retry_after("a")
+    limiter.retry_after("zz")
+    assert lock.entered == 3 and lock.depth == 0
+
+
+def test_concurrent_callers_cannot_overspend_one_bucket():
+    import sys
+    import threading
+    from ratelimit import PerUserLimiter
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        limiter = PerUserLimiter(rate=1e-9, capacity=50)
+        granted = []
+
+        def worker():
+            granted.extend(limiter.allow("a") for _ in range(200))
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+    finally:
+        sys.setswitchinterval(old)
+    assert sum(granted) == 50
