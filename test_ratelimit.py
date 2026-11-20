@@ -82,7 +82,7 @@ def test_retry_after_is_current_after_existing_users_spend_more(monkeypatch):
 def test_invalid_config_is_rejected():
     import pytest
     from ratelimit import PerUserLimiter
-    for kwargs in ({"rate": 0, "capacity": 1}, {"rate": 1, "capacity": 0}, {"rate": 1, "capacity": 1, "max_users": 0}):
+    for kwargs in ({"rate": float("nan"), "capacity": 1}, {"rate": float("inf"), "capacity": 1}, {"rate": -1, "capacity": 1}, {"rate": 0, "capacity": 1}, {"rate": 1, "capacity": 0}, {"rate": 1, "capacity": 1, "max_users": 0}):
         with pytest.raises(ValueError):
             PerUserLimiter(**kwargs)
 
@@ -195,3 +195,16 @@ def test_concurrent_callers_cannot_overspend_one_bucket():
     finally:
         sys.setswitchinterval(old)
     assert sum(granted) == 50
+
+
+def test_deadline_is_measured_from_the_scan_instant_not_a_later_clock_read(monkeypatch):
+    import itertools
+    import ratelimit
+    from ratelimit import PerUserLimiter
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: 0.0)
+    limiter = PerUserLimiter(rate=0.1, capacity=2, max_users=1)
+    limiter.allow("a", cost=2)
+    ticks = itertools.count(1)  # every later clock read is 0.1s later than the last
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: 5.0 + 0.1 * next(ticks))
+    # at t=5.0 the bucket holds 0.5 tokens: 15s to full, so deadline is exactly 20.0
+    assert limiter._slot_deadline(5.0) == 20.0
