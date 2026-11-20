@@ -29,12 +29,23 @@ def test_retry_after_counts_elapsed_time_and_never_goes_negative(monkeypatch):
     assert limiter.retry_after("a") == 0.0
 
 
-def test_buckets_are_bounded_and_cost_is_validated():
+def test_full_table_fails_closed_and_never_resets_a_drained_bucket(monkeypatch):
+    import ratelimit
+    from ratelimit import PerUserLimiter
+    now = [0.0]
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
+    limiter = PerUserLimiter(rate=1, capacity=2, max_users=2)
+    assert limiter.allow("a", cost=2)  # a drained
+    assert limiter.allow("b", cost=2)  # b drained
+    assert not limiter.allow("c")  # table full of active users: reject
+    assert not limiter.allow("a")  # a was not evicted, still drained
+    now[0] += 2  # both refill to full
+    assert limiter.allow("c")  # a full bucket is evicted to make room
+    assert len(limiter.buckets) == 2
+
+
+def test_cost_is_validated():
     import pytest
     from ratelimit import PerUserLimiter
-    limiter = PerUserLimiter(rate=1, capacity=1, max_users=2)
-    for user in ("a", "b", "c"):
-        limiter.allow(user)
-    assert list(limiter.buckets) == ["b", "c"]
     with pytest.raises(ValueError):
-        limiter.allow("a", cost=0)
+        PerUserLimiter(rate=1, capacity=1).allow("a", cost=0)
